@@ -1,5 +1,5 @@
 # config.py - Constants and configuration
-MODEL = "claude-sonnet-4-20250514"
+MODEL = "claude-sonnet-5"
 MAX_RETRIES = 2
 
 # --- ANSI console colors ---
