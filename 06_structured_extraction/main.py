@@ -53,6 +53,7 @@ def load_invoice(filename):
 
 def format_few_shot_examples(examples):
     """Format few-shot examples for the {few_shot_examples} template variable."""
+    # [Step 7] — few-shot examples for consistent extraction [Task 4.2]
     formatted = []
     for i, ex in enumerate(examples, 1):
         extraction_json = json.dumps(ex["extraction"], indent=2)
@@ -108,6 +109,7 @@ def validate_extraction(extraction):
     """Validate extracted data and return a list of error strings."""
     errors = []
 
+    # [Step 5] — self-correction: compare calculated vs stated total [Task 4.4]
     calculated = extraction.get("calculated_total")
     stated = extraction.get("stated_total")
     if calculated is not None and stated is not None:
@@ -119,27 +121,24 @@ def validate_extraction(extraction):
             )
             errors.append(error)
 
-    return errors
+    # [Step 6] — additional validation checks [Task 4.4]
 
-
-    # TODO (Step 6): Add additional validation checks:
-    #
-      # Check required fields are not None
+    # Check required fields are not None
     for field in ["invoice_number", "vendor_name", "invoice_date"]:
         if extraction.get(field) is None:
             errors.append(f"Required field '{field}' is null — info absent from document")
-    #
-    #   # Check date format (YYYY-MM-DD)
+
+    # Check date format (YYYY-MM-DD)
     date_val = extraction.get("invoice_date", "")
     if date_val and not _is_valid_date(date_val):
         errors.append(f"Invalid date format: {date_val} (expected YYYY-MM-DD)")
-    #
-    #   # Check line items are not empty
+
+    # Check line items are not empty
     items = extraction.get("line_items", [])
     if not items:
         errors.append("No line items extracted")
 
-
+    return errors
 
 
 def _is_valid_date(date_str):
@@ -155,6 +154,7 @@ def _is_valid_date(date_str):
 
 def retry_with_feedback(client, invoice_text, extraction, errors, system_prompt):
     """Retry extraction, appending validation errors as feedback."""
+    # [Step 6] — retry with error feedback via is_error tool result [Task 4.4]
     error_list = "\n".join(f"- {e}" for e in errors)
     failed_json = json.dumps(extraction, indent=2)
     messages = [
@@ -213,19 +213,17 @@ def retry_with_feedback(client, invoice_text, extraction, errors, system_prompt)
 
 def classify_review_need(extraction):
     """Route an extraction to auto_approve, spot_check, or human_review."""
-    # TODO (Step 9): Implement confidence-based routing.
-    #
-    #   confidence = extraction.get("confidence", {})
-    #   overall = confidence.get("overall", "low")
-    #   flags = confidence.get("flags", [])
-    #
-    #   if overall == "high" and not flags:
-    #       return "auto_approve"
-    #   elif overall == "low" or len(flags) >= 3:
-    #       return "human_review"
-    #   else:
-    #       return "spot_check"
-    return "auto_approve"
+    # [Step 9] — confidence-based routing [Task 5.5]
+    confidence = extraction.get("confidence", {})
+    overall = confidence.get("overall", "low")
+    flags = confidence.get("flags", [])
+
+    if overall == "high" and not flags:
+        return "auto_approve"
+    elif overall == "low" or len(flags) >= 3:
+        return "human_review"
+    else:
+        return "spot_check"
 
 
 # --- Pipeline ---

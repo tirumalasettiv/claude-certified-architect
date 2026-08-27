@@ -52,10 +52,11 @@ extract_invoice_schema = {
                 "type": ["string", "null"],
                 "description": "Purchase order number. Null if not referenced.",
             },
+            # [Step 4] — enum with "unclear" for ambiguous payment terms [Task 4.3]
             "payment_terms": {
                 "type": "string",
                 "enum": ["net_15", "net_30", "net_45", "net_60",
-                        "due_on_receipt", "unclear"],
+                         "due_on_receipt", "unclear"],
                 "description": "Payment terms. Use 'unclear' when terms are ambiguous "
                 "or reference external agreements.",
             },
@@ -109,27 +110,26 @@ extract_invoice_schema = {
                 "type": "number",
                 "description": "Total amount exactly as stated on the invoice.",
             },
-            # TODO (Step 5): Add a calculated_total field here:
-             "calculated_total": {
+            # [Step 5] — self-correction: independent calculation [Task 4.4]
+            "calculated_total": {
                 "type": "number",
                 "description": "Sum of line item amounts plus tax. Computed by "
-                               "you independently of the stated total.",
+                "you independently of the stated total.",
             },
-
-            # TODO (Step 5): Add a conflict_detected field here:
-              "conflict_detected": {
+            # [Step 5] — conflict flag for mismatched totals [Task 4.4]
+            "conflict_detected": {
                 "type": "boolean",
                 "description": "True when calculated_total differs from stated_total.",
             },
-
+            # [Step 4] — enum with "other" + detail for extensible categories [Task 4.3]
             "category": {
                 "type": "object",
                 "properties": {
                     "value": {
                         "type": "string",
                         "enum": ["consulting", "office_supplies",
-                                "technology", "maintenance", "travel",
-                                "utilities", "other"],
+                                 "technology", "maintenance", "travel",
+                                 "utilities", "other"],
                         "description": "Best-fit category for this invoice.",
                     },
                     "detail": {
@@ -139,24 +139,23 @@ extract_invoice_schema = {
                 },
                 "required": ["value"],
             },
-
-            # TODO (Step 9): Add a confidence object here:
-            #   "confidence": {
-            #       "type": "object",
-            #       "properties": {
-            #           "overall": {
-            #               "type": "string",
-            #               "enum": ["high", "medium", "low"],
-            #               "description": "Overall extraction confidence.",
-            #           },
-            #           "flags": {
-            #               "type": "array",
-            #               "items": {"type": "string"},
-            #               "description": "List of fields or issues with reduced confidence.",
-            #           },
-            #       },
-            #       "required": ["overall", "flags"],
-            #   },
+            # [Step 9] — confidence object for review routing [Task 5.5]
+            "confidence": {
+                "type": "object",
+                "properties": {
+                    "overall": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                        "description": "Overall extraction confidence.",
+                    },
+                    "flags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of fields or issues with reduced confidence.",
+                    },
+                },
+                "required": ["overall", "flags"],
+            },
         },
         "required": [
             "invoice_number",
@@ -168,7 +167,10 @@ extract_invoice_schema = {
             "currency",
             "line_items",
             "stated_total",
+            "calculated_total",
+            "conflict_detected",
             "category",
+            "confidence",
         ],
     },
 }
