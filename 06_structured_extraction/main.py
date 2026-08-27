@@ -53,23 +53,18 @@ def load_invoice(filename):
 
 def format_few_shot_examples(examples):
     """Format few-shot examples for the {few_shot_examples} template variable."""
-    # TODO (Step 7): Format each example as a numbered block showing the
-    #   invoice text and the correct extraction JSON. Return the formatted
-    #   string. Here is the pattern:
-    #
-    #   formatted = []
-    #   for i, ex in enumerate(examples, 1):
-    #       extraction_json = json.dumps(ex["extraction"], indent=2)
-    #       block = (
-    #           f"<example>\n"
-    #           f"<invoice>\n{ex['document']}\n</invoice>\n"
-    #           f"<correct_extraction>\n{extraction_json}\n</correct_extraction>\n"
-    #           f"</example>"
-    #       )
-    #       formatted.append(block)
-    #   result = "\n\n".join(formatted)
-    #   return result
-    return "No examples provided."
+    formatted = []
+    for i, ex in enumerate(examples, 1):
+        extraction_json = json.dumps(ex["extraction"], indent=2)
+        block = (
+            f"<example>\n"
+            f"<invoice>\n{ex['document']}\n</invoice>\n"
+            f"<correct_extraction>\n{extraction_json}\n</correct_extraction>\n"
+            f"</example>"
+        )
+        formatted.append(block)
+    result = "\n\n".join(formatted)
+    return result
 
 
 # --- Extraction [Task 4.3] ---
@@ -113,38 +108,38 @@ def validate_extraction(extraction):
     """Validate extracted data and return a list of error strings."""
     errors = []
 
-    # TODO (Step 5): Compare calculated_total to stated_total.
-    #   If they differ by more than $0.01, append an error message:
-    #
-    #   calculated = extraction.get("calculated_total")
-    #   stated = extraction.get("stated_total")
-    #   if calculated is not None and stated is not None:
-    #       diff = abs(calculated - stated)
-    #       if diff > 0.01:
-    #           error = (
-    #               f"Total mismatch: stated_total={stated}, "
-    #               f"calculated_total={calculated}, difference={diff:.2f}"
-    #           )
-    #           errors.append(error)
+    calculated = extraction.get("calculated_total")
+    stated = extraction.get("stated_total")
+    if calculated is not None and stated is not None:
+        diff = abs(calculated - stated)
+        if diff > 0.01:
+            error = (
+                f"Total mismatch: stated_total={stated}, "
+                f"calculated_total={calculated}, difference={diff:.2f}"
+            )
+            errors.append(error)
+
+    return errors
+
 
     # TODO (Step 6): Add additional validation checks:
     #
-    #   # Check required fields are not None
-    #   for field in ["invoice_number", "vendor_name", "invoice_date"]:
-    #       if extraction.get(field) is None:
-    #           errors.append(f"Required field '{field}' is null — info absent from document")
+      # Check required fields are not None
+    for field in ["invoice_number", "vendor_name", "invoice_date"]:
+        if extraction.get(field) is None:
+            errors.append(f"Required field '{field}' is null — info absent from document")
     #
     #   # Check date format (YYYY-MM-DD)
-    #   date_val = extraction.get("invoice_date", "")
-    #   if date_val and not _is_valid_date(date_val):
-    #       errors.append(f"Invalid date format: {date_val} (expected YYYY-MM-DD)")
+    date_val = extraction.get("invoice_date", "")
+    if date_val and not _is_valid_date(date_val):
+        errors.append(f"Invalid date format: {date_val} (expected YYYY-MM-DD)")
     #
     #   # Check line items are not empty
-    #   items = extraction.get("line_items", [])
-    #   if not items:
-    #       errors.append("No line items extracted")
+    items = extraction.get("line_items", [])
+    if not items:
+        errors.append("No line items extracted")
 
-    return errors
+
 
 
 def _is_valid_date(date_str):
@@ -160,59 +155,56 @@ def _is_valid_date(date_str):
 
 def retry_with_feedback(client, invoice_text, extraction, errors, system_prompt):
     """Retry extraction, appending validation errors as feedback."""
-    # TODO (Step 6): Implement the retry loop.
-    #
-    #   error_list = "\n".join(f"- {e}" for e in errors)
-    #   failed_json = json.dumps(extraction, indent=2)
-    #   messages = [
-    #       {
-    #           "role": "user",
-    #           "content": (
-    #               "Extract all fields from this invoice:\n\n"
-    #               f"<invoice>\n{invoice_text}\n</invoice>"
-    #           ),
-    #       },
-    #       {
-    #           "role": "assistant",
-    #           "content": [
-    #               {
-    #                   "type": "tool_use",
-    #                   "id": "retry_call",
-    #                   "name": "extract_invoice",
-    #                   "input": extraction,
-    #               }
-    #           ],
-    #       },
-    #       {
-    #           "role": "user",
-    #           "content": [
-    #               {
-    #                   "type": "tool_result",
-    #                   "tool_use_id": "retry_call",
-    #                   "content": (
-    #                       f"Validation failed. Fix these errors and re-extract:\n"
-    #                       f"{error_list}\n\n"
-    #                       f"Previous extraction:\n{failed_json}"
-    #                   ),
-    #                   "is_error": True,
-    #               }
-    #           ],
-    #       },
-    #   ]
-    #
-    #   response = client.messages.create(
-    #       model=MODEL,
-    #       max_tokens=4096,
-    #       system=system_prompt,
-    #       tools=[extract_invoice_schema],
-    #       tool_choice={"type": "tool", "name": "extract_invoice"},
-    #       messages=messages,
-    #   )
-    #
-    #   for block in response.content:
-    #       if block.type == "tool_use":
-    #           return block.input
-    #   return extraction
+    error_list = "\n".join(f"- {e}" for e in errors)
+    failed_json = json.dumps(extraction, indent=2)
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Extract all fields from this invoice:\n\n"
+                f"<invoice>\n{invoice_text}\n</invoice>"
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "retry_call",
+                    "name": "extract_invoice",
+                    "input": extraction,
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "retry_call",
+                    "content": (
+                        f"Validation failed. Fix these errors and re-extract:\n"
+                        f"{error_list}\n\n"
+                        f"Previous extraction:\n{failed_json}"
+                    ),
+                    "is_error": True,
+                }
+            ],
+        },
+    ]
+
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=4096,
+        system=system_prompt,
+        tools=[extract_invoice_schema],
+        tool_choice={"type": "tool", "name": "extract_invoice"},
+        messages=messages,
+    )
+
+    for block in response.content:
+        if block.type == "tool_use":
+            return block.input
     return extraction
 
 

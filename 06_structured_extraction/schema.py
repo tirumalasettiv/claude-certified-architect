@@ -52,15 +52,12 @@ extract_invoice_schema = {
                 "type": ["string", "null"],
                 "description": "Purchase order number. Null if not referenced.",
             },
-            # TODO (Step 4): Replace the plain string type with an enum:
-            #   "type": "string",
-            #   "enum": ["net_15", "net_30", "net_45", "net_60",
-            #            "due_on_receipt", "unclear"]
-            #   Use "unclear" when terms are ambiguous or reference
-            #   external agreements.
             "payment_terms": {
                 "type": "string",
-                "description": "Payment terms. Use 'unclear' if ambiguous.",
+                "enum": ["net_15", "net_30", "net_45", "net_60",
+                        "due_on_receipt", "unclear"],
+                "description": "Payment terms. Use 'unclear' when terms are ambiguous "
+                "or reference external agreements.",
             },
             "currency": {
                 "type": "string",
@@ -113,42 +110,36 @@ extract_invoice_schema = {
                 "description": "Total amount exactly as stated on the invoice.",
             },
             # TODO (Step 5): Add a calculated_total field here:
-            #   "calculated_total": {
-            #       "type": "number",
-            #       "description": "Sum of line item amounts plus tax. Computed by "
-            #                      "you independently of the stated total.",
-            #   },
+             "calculated_total": {
+                "type": "number",
+                "description": "Sum of line item amounts plus tax. Computed by "
+                               "you independently of the stated total.",
+            },
 
             # TODO (Step 5): Add a conflict_detected field here:
-            #   "conflict_detected": {
-            #       "type": "boolean",
-            #       "description": "True when calculated_total differs from stated_total.",
-            #   },
-
-            # TODO (Step 4): Replace the plain string with an object that uses
-            #   an enum plus a detail field:
-            #   "category": {
-            #       "type": "object",
-            #       "properties": {
-            #           "value": {
-            #               "type": "string",
-            #               "enum": ["consulting", "office_supplies",
-            #                        "technology", "maintenance", "travel",
-            #                        "utilities", "other"],
-            #               "description": "Best-fit category for this invoice.",
-            #           },
-            #           "detail": {
-            #               "type": ["string", "null"],
-            #               "description": "Explanation when value is 'other'. Null otherwise.",
-            #           },
-            #       },
-            #       "required": ["value"],
-            #   },
-            "category": {
-                "type": "string",
-                "description": "Invoice category (e.g., consulting, office_supplies, "
-                "technology, maintenance, travel, utilities).",
+              "conflict_detected": {
+                "type": "boolean",
+                "description": "True when calculated_total differs from stated_total.",
             },
+
+            "category": {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "type": "string",
+                        "enum": ["consulting", "office_supplies",
+                                "technology", "maintenance", "travel",
+                                "utilities", "other"],
+                        "description": "Best-fit category for this invoice.",
+                    },
+                    "detail": {
+                        "type": ["string", "null"],
+                        "description": "Explanation when value is 'other'. Null otherwise.",
+                    },
+                },
+                "required": ["value"],
+            },
+
             # TODO (Step 9): Add a confidence object here:
             #   "confidence": {
             #       "type": "object",
