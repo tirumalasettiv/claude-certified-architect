@@ -112,7 +112,8 @@ for block in response.content:
 | **none** | `{"type": "none"}` | No tool is called | Force a text-only turn even though tools are registered |
 
 > Trap: an option that says "use `tool_choice: auto` and instruct the model in the prompt to always call the tool" is **wrong for extraction** — `auto` permits a text response, which is exactly the failure you were asked to eliminate.
-> Trap: forced `tool_choice` **disables extended thinking** on the same request, and the model can't emit a preamble. If a question wants reasoning *and* strict shape, the answer is two passes (reason → then extract), not one forced call.
+> Trap (platform-specific, and easy to get backwards): forced `tool_choice` and extended thinking **do** coexist on the **Claude API** and Vertex AI. **Amazon Bedrock is the exception** — there, forced `tool_choice` (`{"type":"tool"}` or `{"type":"any"}`) requires `thinking: {"type": "disabled"}` on the same request. This lab is the Claude API, so don't carry the Bedrock constraint into a Claude API answer.
+> Also worth knowing: any `tool_choice` value accepts `"disable_parallel_tool_use": true`, capping the model at one tool call per response.
 
 ### 2.2 The three escape hatches
 
@@ -181,12 +182,40 @@ Guaranteed by the schema: valid JSON, correct types, keys present, enum membersh
 
 That gap is exactly why 4.4 (validation/retry) and 5.5 (confidence/human review) exist. If a question says "we added a strict schema and still get bad data," the answer is never "make the schema stricter."
 
+### 2.5 Structured outputs — the API feature beyond plain tool use
+
+The lab (and the exam) uses plain `tool_use` + `input_schema`. The current API adds two stricter mechanisms on top. Know they exist, know they don't change the answer to a *semantic* failure.
+
+**(a) Strict tool use** — `strict: true` goes on the **tool definition itself**, alongside `name`/`description`/`input_schema` — *not* on `tool_choice`:
+
+```python
+extract_invoice_schema = {
+    "name": "extract_invoice",
+    "description": "...",
+    "strict": True,                       # top-level, on the tool
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,     # required under strict
+        "properties": {...},
+        "required": [...],
+    },
+}
+```
+
+It guarantees `tool_use.input` validates against the schema exactly. Constraints: `additionalProperties: false` is mandatory on every object; recursive schemas, numeric bounds (`minimum`/`maximum`), and string bounds (`minLength`/`maxLength`) are unsupported (the Python/TS SDKs strip them and validate client-side); express nullables with an explicit `null` type or `anyOf`.
+
+**(b) JSON outputs** — `output_config: {"format": {...}}` constrains the *response* rather than a tool input; `client.messages.parse()` validates it for you. (The old top-level `output_format` parameter is deprecated.) Not what you want here — extraction wants the tool contract — but it's the right tool when there is no tool at all.
+
+Supported on Fable 5, Opus 5, Opus 4.8, Sonnet 5, Haiku 4.5. Works with Batches, streaming, token counting, and extended thinking. **Incompatible with citations (400) and with prefilling.** A new schema pays a one-time compilation latency, then caches for 24 hours.
+
+> The exam-relevant point: `strict: true` closes the last *type*-validation gap. It still cannot tell you whether `stated_total` was read off the right line of the invoice. §2.4 survives intact.
+
 ### Why the alternatives lose
 
 | Alternative | Why it loses |
 |---|---|
 | "Return JSON" in the prompt + `json.loads()` | No enforcement. Prose preamble, markdown fences, trailing commas, dropped keys. You're writing a parser and a repair loop instead of using the one the API gives you. |
-| Assistant **prefill** with `{` | Nudges shape, enforces nothing — no key/type/enum guarantees, and it fights `tool_choice`. Fine for tone/format steering, not for contracts. |
+| Assistant **prefill** with `{` | **Removed from the API — returns a 400** on Claude Opus 5, Sonnet 5, Fable 5, and the whole 4.6/4.7/4.8 family. Even when it worked it only nudged shape and guaranteed nothing. An option offering prefill as the structured-output mechanism is wrong on both design *and* API grounds. |
 | Regex / string parsing of a text response | Brittle to any format change, silently wrong, unmaintainable across 7 invoice formats let alone hundreds. |
 | Post-hoc `jsonschema` validation of free text | Detects failure *after* paying for a bad generation, and gives you nothing to repair with. Use `jsonschema` **in addition to** tool_use, never instead of it. |
 | Fine-tuning a model to emit the shape | Wrong altitude, wrong cost, wrong iteration speed — and the exam's stack is prompt/schema engineering, not training. |
@@ -387,7 +416,8 @@ Track a `detected_pattern` field naming the construct that triggered the failure
 ### 5.1 Exam concept — the three numbers
 
 **50% cost reduction · 24-hour processing window · no latency SLA.**
-(Most batches finish far sooner; you may not *rely* on that. Results are retrievable for ~29 days.)
+
+Supporting numbers worth carrying in: up to **100,000 requests or 256 MB** per batch; **most batches complete within an hour**, but 24h is the contract and you may not design against the average; results stay retrievable for **29 days** after creation; **all Messages API features work in a batch** — vision, tools, prompt caching.
 
 ### Best design approach
 
@@ -449,7 +479,7 @@ Method: `SLA − 24h = buffer`. Buffer ≤ 0 → sync. Buffer > 0 → submit at 
 ### Four batch facts that show up as distractors
 
 1. **Results return in a different order than submitted.** `custom_id` is the only reliable way to match a result to its source document. Not index, not order, not filename-in-content.
-2. **Each request is a single turn — no multi-turn tool calling inside a batch request.** One forced tool call is fine (that's this lab). An agentic loop is not; that needs the sync API.
+2. **A batch request is one non-streaming Messages call — the loop cannot run inside it.** You may *send* a multi-turn history (that's how the retry message shape works), but nothing executes a tool and feeds the result back within the request. One forced tool call is fine (that's this lab); an agentic tool-call → result → next-call loop needs the sync API.
 3. **Requests are independent** — no shared state, no ordering guarantees, no cross-request context.
 4. **Failures are resubmitted by `custom_id`**, optionally with modifications — e.g. chunk an oversized document and resubmit as `invoice_42_part1`, `invoice_42_part2`.
 
@@ -556,18 +586,24 @@ Two rules that follow:
 These aren't S6 task statements, but they show up in S6 answer options. Know when each is right and — more often — when it's the plausible-but-wrong pick.
 
 ### Prompt caching
-The system prompt here is large and **identical across every invoice** (rules + 3 full few-shot examples). Cache it: mark the last system block with `"cache_control": {"type": "ephemeral"}`. Cache **reads** cost roughly 0.1× base input; **writes** ~1.25× (5-minute TTL) or ~2× (1-hour TTL). There's a minimum cacheable prefix (~1024 tokens; higher for Haiku-class models) and a small number of breakpoints (4). Order matters: **static content first** (tools → system → examples), variable content (the invoice) last, or you invalidate the prefix every request.
+The system prompt here is large and **identical across every invoice** (rules + 3 full few-shot examples). Cache it: mark the last system block with `"cache_control": {"type": "ephemeral"}` (or pass top-level `cache_control` to auto-place it).
+
+- **Economics:** reads ~**0.1×** base input; writes **1.25×** (5-minute TTL) or **2×** (`"ttl": "1h"`). Break-even is **2 requests** on the 5-minute TTL, **3+** on the 1-hour. A read also refreshes the entry's timer for free, so continuous traffic keeps a 5-minute entry alive indefinitely — the 1-hour TTL only pays off for start-to-start gaps of 5–60 minutes.
+- **Minimum cacheable prefix is model-dependent and NOT monotonic across generations:** 512 tokens (Opus 5, Fable 5) · **1024 (Sonnet 5 — this lab's model, and Opus 4.8)** · 2048 (Opus 4.7, Haiku 3.5) · 4096 (Opus 4.6, Opus 4.5, Haiku 4.5). Below the minimum it silently does not cache — no error, just `cache_creation_input_tokens: 0`.
+- **Max 4 breakpoints** per request. Render order is `tools` → `system` → `messages`, so put **static content first** and the invoice last, or you invalidate the prefix every request.
+- **Verify, don't assume:** if `usage.cache_read_input_tokens` is 0 across repeated requests, something in the prefix is varying (a timestamp, an unsorted `json.dumps`, a per-request tool list).
 **Right answer when:** "reduce cost/latency on a high-volume sync pipeline with a large fixed prompt."
 **Wrong answer when:** the ask is bulk offline throughput (→ batch) or output shape (→ schema). Caching and batching **combine**; they aren't rivals.
 
 ### PDF and image input
-Real invoices are PDFs and scans. Send them as `document` blocks (base64 / URL / Files API) or `image` blocks — the model reads page text *and* page layout. There are per-request page and size limits, and page images are token-expensive, so budget accordingly.
+Real invoices are PDFs and scans. Send them as `document` blocks (base64 / URL / Files API) or `image` blocks — the model reads page text *and* page layout. Concrete limits: **32 MB per request** and **600 pages** (100 pages on 200K-context models); the base64 string must contain no newlines; put the document block **before** the text block in the user turn. Page images are token-expensive, so budget accordingly — count first with `client.messages.count_tokens`.
 **Right answer when:** "our invoices are scanned PDFs, how do we extract?" → same forced-tool-call pipeline, different input block. **The schema, validation, retry, and routing layers do not change.**
 **Wrong answer when:** offered as a fix for fabrication or inconsistency — OCR quality is an input problem, not a schema problem. (Note: `extract_images.py` in this lab decodes the RVL-CDIP invoice image corpus — that's the on-ramp to this exact scenario.)
 
 ### Citations
-For provenance ("which part of the document did this value come from?"), citations tie output spans back to source document blocks. Relevant to audit trails in AP.
+For provenance ("which part of the document did this value come from?"), set `citations: {"enabled": true}` on each `document` block — all of them or none. The response then splits into multiple `text` blocks, and cited ones carry a `citations` array with `cited_text` plus a location: `char_location` for text, `page_location` (1-indexed) for PDF. Directly useful for an AP audit trail.
 **Wrong answer when:** the question is about shape enforcement or missing fields.
+**Hard constraint:** citations are **incompatible with `output_config.format`** (returns a 400), so a "cite your sources *and* constrain the JSON response" option is not buildable as stated — tool use plus citations is the combination that works.
 
 ### Chunking / long documents
 A 200-page invoice packet exceeds sane per-request limits. Chunk by document boundary, extract per chunk, correlate by `custom_id` (`doc_42_part1`, …), then merge. The lab explicitly mentions chunking oversized documents before **resubmission** after a batch failure.
@@ -597,6 +633,7 @@ Same shape as confidence routing: define the ambiguity, expose it in the contrac
 | "guessed the payment terms" | Schema | enum + `"unclear"` |
 | "filed catering as consulting" | Schema | enum + `"other"` + `detail` |
 | "returns the string `"null"`" | Schema | nullable union type (the field is a plain `string` today) |
+| "a tool input occasionally has the wrong type" | Schema | `strict: true` on the tool definition + `additionalProperties: false` |
 | "inconsistent across runs / new formats" | Prompt | 2–4 few-shot examples of ambiguous cases |
 | "European invoices come out wrong" | Prompt | normalization rules **+** a European example |
 | "totals silently wrong" | Schema + code | `calculated_total` + `conflict_detected` + tolerance check |
@@ -636,13 +673,13 @@ Same shape as confidence routing: define the ambiguity, expose it in the contrac
 
 ---
 
-## 10. Practice exam — 18 scenario items
+## 10. Practice exam — 20 scenario items
 
 *Answers and distractor analysis in §11. Cover it and take these cold.*
 
 **Q1.** Your extraction pipeline returns valid JSON 100% of the time, but 8% of extractions contain a `vendor_phone` for invoices that have no phone number on them. What fixes this?
-A. Add "do not guess" to the system prompt
-B. Change `vendor_phone` to `{"type": ["string","null"]}` and remove it from `required`
+A. Change `vendor_phone` to `{"type": ["string","null"]}` and remove it from `required`
+B. Add "do not guess" to the system prompt
 C. Add a post-extraction regex check that the phone matches a valid format
 D. Lower temperature to 0
 
@@ -660,14 +697,14 @@ D. Move `payment_terms` out of `required`
 
 **Q4.** Your team added a strict JSON schema with forced `tool_choice`. Extractions are always schema-valid, yet AP still reports incorrect totals reaching payment. What's the correct read?
 A. The schema isn't strict enough; add `additionalProperties: false`
-B. Schemas guarantee syntax, not semantics; add a self-correction field plus deterministic validation
+B. The API is dropping fields; add retries
 C. Switch to a larger model
-D. The API is dropping fields; add retries
+D. Schemas guarantee syntax, not semantics; add a self-correction field plus deterministic validation
 
 **Q5.** Which set of few-shot examples best improves consistency for an invoice extractor?
 A. 12 clean invoices from your 12 largest vendors
-B. 3 examples: one clean, one sparse with `null`s and `"unclear"`, one European-format with a total mismatch
-C. 1 example showing the full JSON shape
+B. 1 example showing the full JSON shape
+C. 3 examples: one clean, one sparse with `null`s and `"unclear"`, one European-format with a total mismatch
 D. 25 examples spanning every country you operate in
 
 **Q6.** `validate_extraction` reports `"Required field 'invoice_number' is null — info absent from document"` for an informal handwritten invoice. What should the pipeline do?
@@ -684,9 +721,9 @@ D. A `user` message containing only the failed JSON
 
 **Q8.** You must extract 40,000 archived invoices for a year-end audit. Nobody is waiting on individual results. Cost is the binding constraint. What do you use?
 A. Sync API with 20 parallel workers
-B. Message Batches API
-C. Sync API with streaming enabled
-D. Sync API with prompt caching only
+B. Sync API with streaming enabled
+C. Sync API with prompt caching only
+D. Message Batches API
 
 **Q9.** Batch results come back and your database has vendor names attached to the wrong invoices. Most likely cause?
 A. The batch expired
@@ -702,8 +739,8 @@ D. Batch and accept occasional SLA misses since most batches finish in under an 
 
 **Q11.** Your accuracy check reports 92% overall across 400 invoices, and leadership wants to automate everything. What do you say?
 A. 92% is above the 90% bar; automate
-B. Break accuracy down per document type and per field before automating anything — the aggregate can hide a failing stratum
-C. Add more few-shot examples until it reaches 98%, then automate
+B. Add more few-shot examples until it reaches 98%, then automate
+C. Break accuracy down per document type and per field before automating anything — the aggregate can hide a failing stratum
 D. Automate and rely on confidence routing to catch failures
 
 **Q12.** An extraction returns `confidence.overall = "high"` with `flags: ["tax_rate inferred from total"]`. How should `classify_review_need` route it?
@@ -713,16 +750,16 @@ C. `human_review` — any flag means human review
 D. Retry to resolve the flag
 
 **Q13.** Which is the best justification for a three-tier routing scheme instead of auto-approve/human-review only?
-A. Three tiers are easier to log
-B. The middle tier is sampled rather than fully reviewed, so reviewer capacity goes to the extractions that need it
+A. The middle tier is sampled rather than fully reviewed, so reviewer capacity goes to the extractions that need it
+B. Three tiers are easier to log
 C. The model produces three confidence levels, so routing must have three tiers
 D. It reduces API cost
 
 **Q14.** You want the model to catch its own arithmetic errors on invoice totals. Best design?
 A. Add a `notes` string field asking it to mention any discrepancies
-B. Add `calculated_total` (number) and `conflict_detected` (boolean) to `required`, and compare with a tolerance in code
-C. Ask the model in the prompt to double-check the math
-D. Run a second extraction and diff the two results
+B. Ask the model in the prompt to double-check the math
+C. Run a second extraction and diff the two results
+D. Add `calculated_total` (number) and `conflict_detected` (boolean) to `required`, and compare with a tolerance in code
 
 **Q15.** Your sync pipeline sends the same 6,000-token system prompt (rules + 3 few-shot examples) with every one of 50,000 daily invoices. Which change cuts cost the most without changing behavior?
 A. Remove two of the three few-shot examples
@@ -731,8 +768,8 @@ C. Switch to batch and accept the 24-hour window
 D. Enable streaming
 
 **Q16.** An option in a question reads: *"Replace deterministic validation with a second Claude call that reviews the extraction."* Why is this usually wrong?
-A. The API doesn't allow chained calls
-B. It's non-deterministic, costs an extra round trip, and can hallucinate approval for checks that plain code can verify exactly
+A. It's non-deterministic, costs an extra round trip, and can hallucinate approval for checks that plain code can verify exactly
+B. The API doesn't allow chained calls
 C. It would exceed the context window
 D. Tool use can't be used twice on the same document
 
@@ -748,12 +785,24 @@ B. Everything — PDFs require a separate extraction service
 C. Only the input: send the PDF as a document block. Schema, few-shot, validation, retry, and routing are unchanged
 D. Switch to batch, since PDFs take longer
 
+**Q19.** Your team wants a hard guarantee that `tool_use.input` conforms to the schema — correct types on every field, no extra keys. What do you change?
+A. Set `tool_choice` to `{"type": "tool", "name": "extract_invoice", "strict": true}`
+B. Add `minLength` and `maximum` constraints to every field
+C. Add `strict: true` as a top-level field on the tool definition and set `additionalProperties: false` on the schema
+D. Switch to `output_config.format` and drop the tool
+
+**Q20.** Your sync pipeline caches an 800-token system prompt on `claude-sonnet-5`, but `usage.cache_read_input_tokens` is 0 on every request. Most likely cause?
+A. The cache TTL expired between requests
+B. You exceeded the 4-breakpoint limit
+C. Prompt caching doesn't work with `tool_choice` forced
+D. 800 tokens is below Sonnet 5's 1024-token minimum cacheable prefix, so it silently never cached
+
 ---
 
 ## 11. Answer key with distractor analysis
 
-**Q1 — B.** Fabrication of *absent* data is a schema-expressibility problem. A plain `string` in `required` leaves the model no legal way to say "not present."
-A: instructions help marginally but the contract still forbids the honest answer. C: detects a *well-formed* fabricated number — validation can't tell invented from real. D: temperature doesn't create an option that isn't in the schema.
+**Q1 — A.** Fabrication of *absent* data is a schema-expressibility problem. A plain `string` in `required` leaves the model no legal way to say "not present."
+B: instructions help marginally but the contract still forbids the honest answer. C: detects a *well-formed* fabricated number — validation can't tell invented from real. D: temperature doesn't create an option that isn't in the schema.
 
 **Q2 — B.** `any` guarantees *some* tool runs while letting the model choose which schema fits.
 A: forces the invoice schema onto receipts and POs. C: `auto` permits a plain text reply. D: forbids tool use entirely.
@@ -761,11 +810,11 @@ A: forces the invoice schema onto receipts and POs. C: `auto` permits a plain te
 **Q3 — B.** The data is present but unresolvable → enum + `"unclear"`.
 A: nullable is for *absent* data; the doc *does* state terms, just by reference. C: `other`+`detail` is the taxonomy-fit hatch (categories), not the ambiguity hatch. D: makes the field optional — the model still fabricates when it does emit it.
 
-**Q4 — B.** The signature sentence: strict schemas eliminate JSON *syntax* errors, not *semantic* ones.
-A: `additionalProperties` blocks extra keys, not wrong values. C: may raise accuracy, doesn't detect anything. D: nothing was dropped; the value was wrong.
+**Q4 — D.** The signature sentence: strict schemas eliminate JSON *syntax* errors, not *semantic* ones.
+A: `additionalProperties: false` — even paired with `strict: true` — blocks extra keys and wrong *types*, never wrong *values*. B: nothing was dropped; the value was wrong. C: may raise accuracy, but detects nothing.
 
-**Q5 — B.** 2–4 examples chosen for the *decisions* they teach: baseline, null/unclear handling, normalization + self-correction.
-A: teaches only the easy case. C: one clean example anchors "fill every field." D: over budget, over-anchors, and country coverage isn't the axis — decision coverage is.
+**Q5 — C.** 2–4 examples chosen for the *decisions* they teach: baseline, null/unclear handling, normalization + self-correction.
+A: teaches only the easy case. B: one clean example anchors "fill every field." D: over budget, over-anchors, and country coverage isn't the axis — decision coverage is.
 
 **Q6 — C.** "Info absent from document" is the canonical **non-retryable** error. Retrying wastes tokens and pressures fabrication.
 A/B/D: all re-read a document that does not contain an invoice number.
@@ -773,8 +822,8 @@ A/B/D: all re-read a document that does not contain an invoice number.
 **Q7 — B.** The exact lab shape: original doc + failed `tool_use` (`input` = failed extraction) + `tool_result` with matching `tool_use_id`, `is_error: True`, and the specific errors.
 A: resampling, not correction. C: system prompts are for standing rules; this loses the failed extraction and per-doc specificity. D: no error context, no source document.
 
-**Q8 — B.** Offline + high volume + cost-bound = Message Batches (50% / 24h / no SLA).
-A: no discount, rate limits, hand-rolled backoff. C: streaming changes time-to-first-token for one request. D: caching helps but batch's 50% dominates here (and the two can combine).
+**Q8 — D.** Offline + high volume + cost-bound = Message Batches (50% / 24h / no SLA; ≤100k requests per batch, so 40,000 fits in one).
+A: no discount, rate limits, hand-rolled backoff. B: streaming changes time-to-first-token for one request. C: caching helps but batch's 50% dominates here — and the two compose, so "only" is what makes C wrong.
 
 **Q9 — B.** Batch results return in arbitrary order; `custom_id` is the only reliable correlation key.
 A: expiry yields `expired` results, not mismatches. C: `auto` would cause missing extractions, not swapped ones. D: truncation, not misalignment.
@@ -782,29 +831,35 @@ A: expiry yields `expired` results, not mismatches. C: `auto` would cause missin
 **Q10 — C.** `20h − 24h` = negative buffer. The window alone blows the SLA.
 A: that's the *30-hour* variant. B: submission frequency can't shrink a 24-hour processing window. D: "most batches finish sooner" is not a guarantee you may design against — there is no latency SLA.
 
-**Q11 — B.** Aggregate masks stratum failure — the 100/95/90/**75** breakdown. Automate only validated (type × field) cells.
-A: assumes uniform accuracy. C: you don't know which type is failing yet. D: confidence routing must itself be calibrated against labeled data first.
+**Q11 — C.** Aggregate masks stratum failure — the 100/95/90/**75** breakdown. Automate only validated (type × field) cells.
+A: assumes uniform accuracy. B: you don't know which type is failing yet. D: confidence routing must itself be calibrated against labeled data first.
 
 **Q12 — B.** Flags override a high rating: `auto_approve` requires `overall == "high"` **and** an empty flags array. One flag isn't the `>= 3` human-review trigger, so it lands in `spot_check`.
 A: ignores flags. C: over-escalates and wastes the middle tier. D: an inferred tax rate is a source-ambiguity issue, not a retryable one.
 
-**Q13 — B.** The middle tier exists to be sampled — that's the reviewer-capacity argument.
-A: irrelevant. C: reverses cause and effect; the tiers are a business design, and you could route three levels into two lanes. D: routing happens after the API call; it doesn't change API cost.
+**Q13 — A.** The middle tier exists to be sampled — that's the reviewer-capacity argument.
+B: irrelevant. C: reverses cause and effect; the tiers are a business design, and you could route three levels into two lanes. D: routing happens after the API call; it doesn't change API cost.
 
-**Q14 — B.** Independent recomputation plus a machine-readable boolean, verified in code with a float tolerance (`> 0.01`).
-A: free text can't be branched on. C: no output artifact, nothing to route. D: doubles cost and gives two guesses with no ground truth.
+**Q14 — D.** Independent recomputation plus a machine-readable boolean, verified in code with a float tolerance (`> 0.01`).
+A: free text can't be branched on. B: no output artifact, nothing to route. C: doubles cost and gives two guesses with no ground truth.
 
 **Q15 — B.** A large, byte-identical prefix on every request is the textbook caching case; keep static content first and the invoice last so the prefix stays valid. Cache reads run ~0.1× base input.
 A: degrades the accuracy the examples buy. C: changes behavior — this is a sync pipeline; 24h latency may be unacceptable (and if it's acceptable, batch *and* caching together is the real answer). D: no cost effect.
 
-**Q16 — B.** Deterministic checks belong in code; model calls are for judgment code can't do.
-A/C/D: all false — chained calls are fine, context isn't the issue, and tool use can be reused freely.
+**Q16 — A.** Deterministic checks belong in code; model calls are for judgment code can't do.
+B/C/D: all false — chained calls are fine, context isn't the issue, and tool use can be reused freely.
 
 **Q17 — B.** Retry is a mechanism, not a guarantee. Invoice 03 carries a volume-discount note; the source is genuinely inconsistent. `conflict_detected: true` plus a flag is the correct terminal state.
 A: it engaged and produced consistent output. C: more retries won't fix the document. D: widening tolerance to hide a real $10 discrepancy defeats the check.
 
 **Q18 — C.** Only the input block changes. The forced tool call, schema hatches, few-shot, validation, retry, and routing layers all still apply — that's the layered architecture paying off.
-A: OCR confidence isn't a field you can get this way; use `confidence.flags`. B: PDFs are native document input. D: input format doesn't determine sync vs batch — latency tolerance does.
+A: OCR confidence isn't a field you can get this way; use `confidence.flags`. B: PDFs are native document input (32 MB / 600 pages per request). D: input format doesn't determine sync vs batch — latency tolerance does.
+
+**Q19 — C.** `strict` is a field on the **tool definition**, next to `name`/`description`/`input_schema`, and it requires `additionalProperties: false`.
+A: `strict` does not belong on `tool_choice` — the most common misplacement. B: numeric and string constraints are **unsupported** under structured outputs (the SDKs strip them and validate client-side). D: `output_config.format` constrains the response body, not a tool input, and it's incompatible with citations; extraction wants the tool contract.
+
+**Q20 — D.** Minimums are model-dependent and non-monotonic — 512 on Opus 5, **1024 on Sonnet 5**, 4096 on Opus 4.6 / Haiku 4.5. Below the minimum, caching silently no-ops with `cache_creation_input_tokens: 0` and no error.
+A: an expiry would still show a write on the first request and reads within the window. B: exceeding 4 breakpoints raises a 400, not silence. C: caching and forced `tool_choice` are orthogonal.
 
 ---
 
@@ -821,12 +876,15 @@ A: OCR confidence isn't a field you can get this way; use `confidence.flags`. B:
 - Retry = original doc + failed `tool_use` + `tool_result(is_error=True)` with **specific errors**, bounded by `MAX_RETRIES`.
 - **Retryable** = format/calculation. **Non-retryable** = info absent from source → human review.
 - `detected_pattern` / `confidence.flags` → **dismissal pattern analysis** → suppress checks that are always dismissed for a doc type.
-- Batch = **50% cost, 24h window, no latency SLA**, single-turn only, results **out of order**, correlate by **`custom_id`**, resubmit failures by `custom_id`.
+- Batch = **50% cost, 24h window, no latency SLA**; ≤100k requests / 256 MB; results kept **29 days**; one non-streaming call per request (no loop inside it); results **out of order** → correlate by **`custom_id`**; resubmit failures by `custom_id`.
 - SLA math: `SLA − 24h = buffer`. Buffer ≤ 0 → sync.
 - Confidence: enum `high/medium/low` + `flags[]`, `required`. `high` **and** no flags → auto_approve; `low` **or** ≥3 flags → human_review; else spot_check. Default missing → `low`.
 - Calibrate on a **labeled validation set**; thresholds scale with the **cost of an error**.
 - **Aggregate accuracy masks per-type failure** → **stratified sampling** per document type **and** per field. Automate only validated strata.
-- Prompt caching: static first, variable last, ~0.1× read cost — for large fixed prompts on sync volume. Combines with batch.
+- Prompt caching: static first, variable last. Reads **0.1×**, writes **1.25×** (5m) / **2×** (1h); break-even 2 requests (5m) or 3+ (1h). Max **4 breakpoints**. Minimum prefix is model-dependent — **1024 on Sonnet 5**, 512 on Opus 5, 4096 on Opus 4.6 / Haiku 4.5 — and below it caching silently no-ops. Combines with batch.
+- `strict: true` goes on the **tool definition** (+ `additionalProperties: false`), never on `tool_choice`. `output_config.format` constrains a *response*; it's incompatible with citations.
+- **Assistant prefill is a 400** on all current models — never the structured-output answer.
+- Forced `tool_choice` + extended thinking coexist on the **Claude API**; only **Bedrock** requires thinking disabled alongside forced tool choice.
 
 ---
 
