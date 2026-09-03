@@ -29,19 +29,73 @@ def load_system_prompt():
 # [Task 5.1] — extract verified facts from tool results so the model retains them
 # even when earlier conversation turns are summarized away
 
+def new_fact_store():
+    """Fresh accumulator: flat customer facts plus per-order facts keyed by order_id."""
+    store = {"customer_id": None, "customer_name": None, "orders": {}}
+    return store
+
+
+def extract_case_facts(fact_store, tool_name, tool_result):
+    """Merge the transactional facts from one successful tool result into fact_store.
+
+    Order-level facts are keyed by order_id so a refund on one order never
+    overwrites the total of a different order the agent looked up earlier.
+    Returns True if any fact changed.
+    """
+    before = json.dumps(fact_store, sort_keys=True)
+
+    if tool_name == "get_customer":
+        fact_store["customer_id"] = tool_result["customer_id"]
+        fact_store["customer_name"] = tool_result["name"]
+    elif tool_name == "lookup_order":
+        fact_store["customer_id"] = tool_result["customer_id"]
+        order = fact_store["orders"].setdefault(tool_result["order_id"], {})
+        order["order_total"] = tool_result["total"]
+    elif tool_name == "process_refund":
+        order = fact_store["orders"].setdefault(tool_result["order_id"], {})
+        order["refund_amount"] = tool_result["amount"]
+        order["refund_status"] = tool_result["status"]
+
+    after = json.dumps(fact_store, sort_keys=True)
+    changed = after != before
+    return changed
+
+
+def format_case_facts(fact_store):
+    """Render the accumulated fact store as the string injected into the system prompt."""
+    lines = []
+    if fact_store["customer_id"]:
+        lines.append(f"- Customer ID: {fact_store['customer_id']}")
+    if fact_store["customer_name"]:
+        lines.append(f"- Customer name: {fact_store['customer_name']}")
+    for order_id, order in fact_store["orders"].items():
+        parts = [f"Order {order_id}"]
+        if "order_total" in order:
+            parts.append(f"total ${order['order_total']:.2f}")
+        if "refund_amount" in order:
+            parts.append(f"refund ${order['refund_amount']:.2f} ({order['refund_status']})")
+        detail = ", ".join(parts)
+        lines.append(f"- {detail}")
+    if not lines:
+        rendered = "No facts collected yet."
+        return rendered
+    rendered = "\n".join(lines)
+    return rendered
+
 
 # --- Prerequisite gate ---
 # [Task 1.4] — programmatic enforcement: block process_refund until get_customer has run
 
 def check_prerequisite(tool_name, tool_history):
     """Block process_refund unless get_customer has already been called successfully."""
-    # TODO: Check if tool_name is "process_refund" and if "get_customer" is NOT
-    # in tool_history. If the prerequisite is missing, return a dict with:
-    #   error: True
-    #   errorCategory: "validation"
-    #   isRetryable: True
-    #   message: explaining that customer identity must be verified first
-    # Otherwise return None to allow the tool call.
+    if tool_name == "process_refund" and "get_customer" not in tool_history:
+        result = {
+            "error": True,
+            "errorCategory": "validation",
+            "isRetryable": True,
+            "message": "Customer identity must be verified via get_customer before processing a refund.",
+        }
+        return result
     return None
 
 
@@ -49,20 +103,18 @@ def check_prerequisite(tool_name, tool_history):
 # [Task 1.5] — hook intercepts outgoing tool calls for compliance enforcement
 
 def post_tool_use_hook(tool_name, tool_input, tool_result):
-    """Intercept tool results to enforce policy rules.
-
-    Checks process_refund calls: if the refund amount exceeds MAX_REFUND_AMOUNT,
-    replace the result with a structured error redirecting to escalation.
-    """
-    # TODO: Check if tool_name is "process_refund" and if tool_input["amount"]
-    # exceeds MAX_REFUND_AMOUNT. If it does, return a replacement result dict with:
-    #   error: True
-    #   errorCategory: "policy_violation"
-    #   isRetryable: False
-    #   message: explaining the amount exceeds the $500 limit and must be escalated
-    #   action: "escalate_to_human"
-    # Otherwise return tool_result unchanged.
+    """Intercept tool results to enforce policy rules."""
+    if tool_name == "process_refund" and tool_input.get("amount", 0) > MAX_REFUND_AMOUNT:
+        result = {
+            "error": True,
+            "errorCategory": "policy_violation",
+            "isRetryable": False,
+            "message": f"Refund amount ${tool_input['amount']:.2f} exceeds the ${MAX_REFUND_AMOUNT} policy limit. This refund must be escalated to a human agent.",
+            "action": "escalate_to_human",
+        }
+        return result
     return tool_result
+
 
 
 # --- Tool execution ---
@@ -110,7 +162,8 @@ def run_agent(user_message):
     messages = [{"role": "user", "content": user_message}]
     tool_history = set()
     # [Task 5.1] — case_facts: verified transactional facts injected into system prompt
-    case_facts = "No facts collected yet."
+    case_fact_store = new_fact_store()
+    case_facts = format_case_facts(case_fact_store)
 
     print(f"\n{CYAN}{BOLD}{'='*60}")
     print(f"Customer: {user_message}")
@@ -121,7 +174,9 @@ def run_agent(user_message):
 
         # [Task 5.1] — format system prompt template with current case_facts
         system_prompt = system_template.format(case_facts=case_facts)
-        print(f"  {DIM}case_facts: {case_facts}{RESET}")
+        print(f"  {DIM}case_facts in system prompt:{RESET}")
+        for fact_line in case_facts.splitlines():
+            print(f"  {DIM}    {fact_line}{RESET}")
 
         try:
             with console.status("Processing request...", spinner="dots"):
@@ -170,6 +225,17 @@ def run_agent(user_message):
                     result = execute_tool(block.name, block.input, tool_history)
                     print(f"  {DIM}Result:{RESET}")
                     console.print(JSON(json.dumps(result, indent=2)), style="dim")
+
+                    # [Task 5.1] — accumulate verified facts from each successful tool result
+                    is_error = isinstance(result, dict) and result.get("error")
+                    facts_changed = False
+                    if not is_error:
+                        facts_changed = extract_case_facts(case_fact_store, block.name, result)
+                    if facts_changed:
+                        case_facts = format_case_facts(case_fact_store)
+                        print(f"  {CYAN}↳ case_facts updated:{RESET}")
+                        for fact_line in case_facts.splitlines():
+                            print(f"  {DIM}    {fact_line}{RESET}")
 
                     tool_result_block = {
                         "type": "tool_result",
